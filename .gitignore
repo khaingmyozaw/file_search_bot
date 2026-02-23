@@ -1,0 +1,4 @@
+.venv
+.env
+search_index.db
+__pycache__

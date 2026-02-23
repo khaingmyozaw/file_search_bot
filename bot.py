@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import sqlite3
@@ -11,7 +10,6 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
-    ChannelPostHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -227,19 +225,21 @@ async def search_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await message.reply_text(reply, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
-async def main() -> None:
+def main() -> None:
     if not TELEGRAM_TOKEN:
         raise RuntimeError("Set TELEGRAM_TOKEN environment variable before starting the bot.")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(ChannelPostHandler(index_channel_post))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_messages))
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, index_channel_post))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_messages)
+    )
 
     logger.info("Bot started.")
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
