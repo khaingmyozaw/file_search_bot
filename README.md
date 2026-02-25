@@ -1,40 +1,61 @@
 # Telegram Channel Search Bot
 
-A simple Telegram bot that saves new posts from channels where it is admin, then lets users search those posts with normal text.
+A Telegram bot that indexes channel posts and lets users search with plain text.
 
-## What it does
+## Features
 
-- Indexes new channel posts automatically.
-- Searches across all indexed channels using keywords.
-- Sends user-friendly search results with links (for public channels).
+- Auto-indexes new posts from channels where the bot is admin.
+- Supports admin-triggered historical backfill with `/sync_channel`.
+- Searches indexed posts with keyword queries.
 
 ## Setup
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Add this bot as **admin** in each channel you want to search.
-3. Install dependencies and run:
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy token.
+2. Add the bot as **admin** to channels you want indexed.
+3. Get `api_id` and `api_hash` from https://my.telegram.org (for MTProto history sync).
+4. Fill `.env`:
+   - `TELEGRAM_TOKEN`
+   - `OWNER_USER_ID` (only this user can run `/sync_channel`)
+   - `TELETHON_API_ID`
+   - `TELETHON_API_HASH`
+   - `TELETHON_STRING_SESSION` (user account session; required for history sync)
+5. Install and run:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env and set TELEGRAM_TOKEN
-export $(grep -v '^#' .env | xargs)
 python bot.py
 ```
 
-## How normal users use it
+Generate `TELETHON_STRING_SESSION` once (interactive login as your Telegram user):
 
-1. Open a DM with the bot.
-2. Send `/start` for quick instructions.
-3. Type any words to search, e.g.:
-   - `invoice march`
-   - `meeting notes`
+```bash
+source .venv/bin/activate
+export TELETHON_API_ID=your_api_id
+export TELETHON_API_HASH=your_api_hash
+python scripts/generate_telethon_string_session.py
+```
 
-The bot replies with top matching posts in a clean, readable list.
+Copy the printed value into `.env` as `TELETHON_STRING_SESSION=...`.
+
+## Commands
+
+- `/start`
+- `/help`
+- `/sync_channel <channel_username_or_id> [limit]`
+
+Example:
+
+```text
+/sync_channel my_public_channel 2000
+```
+
+This imports up to 2000 older messages from that channel into `search_index.db`.
 
 ## Notes
 
-- Telegram bots only index messages they can receive. If the bot was added later, old channel history is not auto-imported.
-- Private channels do not provide public message links, but the bot still shows where the message came from.
+- `/sync_channel` is owner-only (`OWNER_USER_ID`).
+- `/sync_channel` uses a user-authorized Telethon session, not bot auth.
+- For private channels, that user account must have access.
