@@ -21,10 +21,12 @@ from telegram.ext import (
 try:
     from telethon import TelegramClient, utils
     from telethon.sessions import StringSession
+    from telethon.tl.types import DocumentAttributeFilename
 except ImportError:  # pragma: no cover - runtime fallback when dependency not installed
     TelegramClient = None
     utils = None
     StringSession = None
+    DocumentAttributeFilename = None
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -173,8 +175,98 @@ class SearchDB:
         ).fetchall()
         return [SearchResult(**dict(row)) for row in rows]
 
+    def get_oldest_message_id(self, channel_id: int) -> Optional[int]:
+        row = self.conn.execute(
+            """
+            SELECT MIN(message_id) AS oldest
+            FROM messages
+            WHERE channel_id = ?
+            """,
+            (channel_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return row["oldest"]
+
+    def list_channels(self) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT
+                channel_id,
+                channel_title,
+                channel_username,
+                COUNT(*) AS total_messages,
+                MAX(posted_at) AS latest_posted_at
+            FROM messages
+            GROUP BY channel_id, channel_title, channel_username
+            ORDER BY channel_title COLLATE NOCASE ASC
+            """
+        ).fetchall()
+
+    def purge_channel(self, identifier: str) -> int:
+        token = identifier.strip()
+        if not token:
+            return 0
+
+        if token.startswith("@"):
+            token = token[1:]
+
+        if token.lstrip("-").isdigit():
+            cursor = self.conn.execute(
+                """
+                DELETE FROM messages
+                WHERE channel_id = ?
+                """,
+                (int(token),),
+            )
+        else:
+            cursor = self.conn.execute(
+                """
+                DELETE FROM messages
+                WHERE LOWER(channel_username) = LOWER(?)
+                """,
+                (token,),
+            )
+
+        self.conn.commit()
+        return cursor.rowcount
+
 
 db = SearchDB(DB_PATH)
+
+
+def build_sync_text(post) -> str:
+    parts: List[str] = []
+    body = (getattr(post, "message", "") or "").strip()
+    if body:
+        parts.append(body)
+
+    media = getattr(post, "media", None)
+    document = getattr(media, "document", None)
+    if document and DocumentAttributeFilename is not None:
+        for attr in getattr(document, "attributes", []) or []:
+            if isinstance(attr, DocumentAttributeFilename) and getattr(attr, "file_name", ""):
+                parts.append(attr.file_name)
+                break
+
+    return " ".join(parts).strip()
+
+
+def build_channel_post_text(post) -> str:
+    parts: List[str] = []
+    if post.text:
+        parts.append(post.text)
+    if post.caption:
+        parts.append(post.caption)
+
+    if post.document and getattr(post.document, "file_name", None):
+        parts.append(post.document.file_name)
+    if post.audio and getattr(post.audio, "file_name", None):
+        parts.append(post.audio.file_name)
+    if post.video and getattr(post.video, "file_name", None):
+        parts.append(post.video.file_name)
+
+    return " ".join(parts).strip()
 
 
 def build_message_link(result: SearchResult) -> Optional[str]:
@@ -200,21 +292,105 @@ def format_result(result: SearchResult, index: int) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 <b>Hi! I can search posts from your channels.</b>\n\n"
-        "How to use me:\n"
-        "1) Add me as <b>admin</b> to each channel you want to index.\n"
-        "2) Keep posting normally — I save new posts automatically.\n"
-        "3) Send me any keyword, for example: <code>invoice March</code>\n\n"
-        "Commands:\n"
-        "/start - show this guide\n"
-        "/help - quick help\n"
-        "/sync_channel &lt;channel_username_or_id&gt; [limit] - import old channel posts\n"
+        "👋 ဟိုင်း! \n"
+        "ရှာချင်တဲ့ သရုပ်ဆောင်အမည် သို့မဟုတ် ဇာတ်ကားအမည်ကို ပေးပို့ပြီး ရှာနိုင်ပါတယ်နော်... \n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await start(update, context)
+    message = update.effective_message
+    if not message:
+        return
+
+    if is_owner(update):
+        await message.reply_text(
+            "Available commands:\n"
+            "/start | စတင်ရန်\n"
+            "/help | commands list ကြည့်ရန်\n"
+            "/channels | channel list ကြည့်ရန်\n"
+            "/sync_channel <channel_username> [limit] | channel ကို sync လုပ်ရန်\n"
+            "/purge_channel <channel_username> | channel ရှင်းရန်\n"
+        )
+        return
+
+    await message.reply_text(
+        "Available commands:\n"
+        "/start | စတင်ရန်\n"
+        "/help | command list ကြည့်ရန်\n"
+        "/channels | channel list ကြည့်ရန်\n\n"
+        "သရုပ်ဆောင်အမည် သို့မဟုတ် ဇာတ်ကားအမည်ကို ရိုက်ထည့်ပြီး ရှာနိုင်ပါတယ်။"
+    )
+
+
+async def channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+
+    rows = db.list_channels()
+    if not rows:
+        await message.reply_text("No searchable channels yet.")
+        return
+
+    lines = ["<b>Channels များ</b>"]
+    for row in rows:
+        title = html.escape(row["channel_title"] or "Unknown Channel")
+        username = row["channel_username"]
+        if username:
+            lines.append(f"- {title} (@{html.escape(username)})")
+        else:
+            lines.append(f"- {title} ({row['channel_id']})")
+
+    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def purge_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+
+    if OWNER_USER_ID <= 0:
+        await message.reply_text("Set OWNER_USER_ID in .env to enable /purge_channel.")
+        return
+    if not is_owner(update):
+        await forbidden_search(message)
+        return
+    if not context.args:
+        await message.reply_text("Usage: /purge_channel <channel_username_or_id>")
+        return
+
+    identifier = context.args[0]
+    deleted_rows = db.purge_channel(identifier)
+    if deleted_rows <= 0:
+        await message.reply_text("No indexed messages found for that channel.")
+        return
+
+    await message.reply_text(f"Purged {deleted_rows} indexed messages for {identifier}.")
+
+
+async def delete_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+
+    if OWNER_USER_ID <= 0:
+        await message.reply_text("Set OWNER_USER_ID in .env to enable /delete_channel.")
+        return
+    if not is_owner(update):
+        await forbidden_search(message)
+        return
+    if not context.args:
+        await message.reply_text("Usage: /delete_channel <channel_username_or_id>")
+        return
+
+    identifier = context.args[0]
+    deleted_rows = db.purge_channel(identifier)
+    if deleted_rows <= 0:
+        await message.reply_text("No indexed messages found for that channel.")
+        return
+
+    await message.reply_text(f"Deleted {deleted_rows} indexed messages for {identifier}.")
 
 
 def is_owner(update: Update) -> bool:
@@ -274,7 +450,7 @@ async def sync_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.reply_text("Set OWNER_USER_ID in .env to enable /sync_channel.")
         return
     if not is_owner(update):
-        await message.reply_text("Only OWNER_USER_ID can run /sync_channel.")
+        await forbidden_search(message)
         return
     if not context.args:
         await message.reply_text("Usage: /sync_channel <channel_username_or_id> [limit]")
@@ -307,11 +483,20 @@ async def sync_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         channel_title = getattr(entity, "title", "Unknown Channel")
         channel_username = getattr(entity, "username", None)
 
-        async for post in client.iter_messages(entity, limit=limit):
-            text = (post.message or "").strip()
+        oldest_indexed_id = db.get_oldest_message_id(channel_id)
+        offset_id = oldest_indexed_id if oldest_indexed_id else 0
+
+        if offset_id:
+            await message.reply_text(
+                f"Continuing from older history before message_id={offset_id}."
+            )
+
+        async for post in client.iter_messages(entity, limit=limit, offset_id=offset_id):
+            text = build_sync_text(post)
             if not text:
+                # Keep a minimal placeholder so media-only posts are still indexed once.
+                text = "[media]"
                 skipped += 1
-                continue
             db.upsert_message(
                 channel_id=channel_id,
                 channel_title=channel_title,
@@ -333,7 +518,7 @@ async def sync_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Sync complete.\n"
         f"Channel: {channel_ref}\n"
         f"Imported: {imported}\n"
-        f"Skipped (no text/caption): {skipped}"
+        f"Media-only placeholders: {skipped}"
     )
 
 
@@ -342,9 +527,9 @@ async def index_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not post:
         return
 
-    text = post.text or post.caption
+    text = build_channel_post_text(post)
     if not text:
-        return
+        text = "[media]"
 
     chat = post.chat
     posted_at = post.date.isoformat()
@@ -359,6 +544,11 @@ async def index_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
     logger.info("Indexed message %s from %s", post.message_id, chat.title)
 
 
+async def forbidden_search(message):
+    return await message.reply_text(
+            "ရှာဖွေလိုတဲ့ စကားလုံးကို နားမလည်ပါ။ ရိုးရှင်းတဲ့ အသုံးနှုန်းများကို သာ support ပေးပါတယ်။ ဥပမာ: Love Phobia လို့ ရိုက်ရှာကြည့်ပါ။"
+        )
+
 async def search_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if not message or not message.text:
@@ -366,19 +556,17 @@ async def search_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     query = message.text.strip()
     if len(query) < 2:
-        await message.reply_text("Please type at least 2 characters to search.")
+        await message.reply_text("တိကျတဲ့ result ရစေရန် အနည်းဆုံး စကားလုံး ၂လုံး ရိုက်ထည့်ပေးပါ။")
         return
 
     try:
         results = db.search(query, limit=MAX_RESULTS)
     except sqlite3.OperationalError:
-        await message.reply_text(
-            "I couldn't understand that search. Try simple keywords like: budget report"
-        )
+        await forbidden_search(message)
         return
 
     if not results:
-        await message.reply_text("No results found. Try another keyword.")
+        await message.reply_text("လိုချင်တဲ့ result ရှာမတွေ့ပါ။ နောက်တစ်မျိုး ပြောင်းလဲပြီး ရှာကြည့်ပါနော်။")
         return
 
     formatted = [format_result(result, i + 1) for i, result in enumerate(results)]
@@ -403,7 +591,10 @@ def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("channels", channels_cmd))
     app.add_handler(CommandHandler("sync_channel", sync_channel))
+    app.add_handler(CommandHandler("purge_channel", purge_channel))
+    app.add_handler(CommandHandler("delete_channel", delete_channel))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, index_channel_post))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_messages)

@@ -44,7 +44,10 @@ Copy the printed value into `.env` as `TELETHON_STRING_SESSION=...`.
 
 - `/start`
 - `/help`
+- `/channels`
 - `/sync_channel <channel_username_or_id> [limit]`
+- `/purge_channel <channel_username_or_id>` (owner-only)
+- `/delete_channel <channel_username_or_id>` (owner-only)
 
 Example:
 
@@ -57,5 +60,14 @@ This imports up to 2000 older messages from that channel into `search_index.db`.
 ## Notes
 
 - `/sync_channel` is owner-only (`OWNER_USER_ID`).
+- `/purge_channel` is owner-only (`OWNER_USER_ID`) and permanently deletes indexed history for that channel.
+- `/delete_channel` is owner-only (`OWNER_USER_ID`) and permanently deletes indexed history for that channel.
 - `/sync_channel` uses a user-authorized Telethon session, not bot auth.
 - For private channels, that user account must have access.
+
+## Admin Channel Delete Flow (telegram_search_bot)
+
+If you are using the aiogram admin bot inside `telegram_search_bot/`, `/remove_channel <identifier>` now supports safe deletion behavior:
+
+- Accessible channel: removed from active tracking, history kept for search.
+- Deleted/inaccessible channel: bot shows admin options to either keep history or delete all indexed history.
