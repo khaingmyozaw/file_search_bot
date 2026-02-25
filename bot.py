@@ -21,10 +21,12 @@ from telegram.ext import (
 try:
     from telethon import TelegramClient, utils
     from telethon.sessions import StringSession
+    from telethon.tl.types import DocumentAttributeFilename
 except ImportError:  # pragma: no cover - runtime fallback when dependency not installed
     TelegramClient = None
     utils = None
     StringSession = None
+    DocumentAttributeFilename = None
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -173,8 +175,55 @@ class SearchDB:
         ).fetchall()
         return [SearchResult(**dict(row)) for row in rows]
 
+    def get_oldest_message_id(self, channel_id: int) -> Optional[int]:
+        row = self.conn.execute(
+            """
+            SELECT MIN(message_id) AS oldest
+            FROM messages
+            WHERE channel_id = ?
+            """,
+            (channel_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return row["oldest"]
+
 
 db = SearchDB(DB_PATH)
+
+
+def build_sync_text(post) -> str:
+    parts: List[str] = []
+    body = (getattr(post, "message", "") or "").strip()
+    if body:
+        parts.append(body)
+
+    media = getattr(post, "media", None)
+    document = getattr(media, "document", None)
+    if document and DocumentAttributeFilename is not None:
+        for attr in getattr(document, "attributes", []) or []:
+            if isinstance(attr, DocumentAttributeFilename) and getattr(attr, "file_name", ""):
+                parts.append(attr.file_name)
+                break
+
+    return " ".join(parts).strip()
+
+
+def build_channel_post_text(post) -> str:
+    parts: List[str] = []
+    if post.text:
+        parts.append(post.text)
+    if post.caption:
+        parts.append(post.caption)
+
+    if post.document and getattr(post.document, "file_name", None):
+        parts.append(post.document.file_name)
+    if post.audio and getattr(post.audio, "file_name", None):
+        parts.append(post.audio.file_name)
+    if post.video and getattr(post.video, "file_name", None):
+        parts.append(post.video.file_name)
+
+    return " ".join(parts).strip()
 
 
 def build_message_link(result: SearchResult) -> Optional[str]:
@@ -307,11 +356,20 @@ async def sync_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         channel_title = getattr(entity, "title", "Unknown Channel")
         channel_username = getattr(entity, "username", None)
 
-        async for post in client.iter_messages(entity, limit=limit):
-            text = (post.message or "").strip()
+        oldest_indexed_id = db.get_oldest_message_id(channel_id)
+        offset_id = oldest_indexed_id if oldest_indexed_id else 0
+
+        if offset_id:
+            await message.reply_text(
+                f"Continuing from older history before message_id={offset_id}."
+            )
+
+        async for post in client.iter_messages(entity, limit=limit, offset_id=offset_id):
+            text = build_sync_text(post)
             if not text:
+                # Keep a minimal placeholder so media-only posts are still indexed once.
+                text = "[media]"
                 skipped += 1
-                continue
             db.upsert_message(
                 channel_id=channel_id,
                 channel_title=channel_title,
@@ -333,7 +391,7 @@ async def sync_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Sync complete.\n"
         f"Channel: {channel_ref}\n"
         f"Imported: {imported}\n"
-        f"Skipped (no text/caption): {skipped}"
+        f"Media-only placeholders: {skipped}"
     )
 
 
@@ -342,9 +400,9 @@ async def index_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not post:
         return
 
-    text = post.text or post.caption
+    text = build_channel_post_text(post)
     if not text:
-        return
+        text = "[media]"
 
     chat = post.chat
     posted_at = post.date.isoformat()
