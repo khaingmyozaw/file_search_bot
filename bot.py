@@ -269,6 +269,40 @@ def build_channel_post_text(post) -> str:
     return " ".join(parts).strip()
 
 
+def build_sync_text(post) -> str:
+    parts: List[str] = []
+    body = (getattr(post, "message", "") or "").strip()
+    if body:
+        parts.append(body)
+
+    media = getattr(post, "media", None)
+    document = getattr(media, "document", None)
+    if document and DocumentAttributeFilename is not None:
+        for attr in getattr(document, "attributes", []) or []:
+            if isinstance(attr, DocumentAttributeFilename) and getattr(attr, "file_name", ""):
+                parts.append(attr.file_name)
+                break
+
+    return " ".join(parts).strip()
+
+
+def build_channel_post_text(post) -> str:
+    parts: List[str] = []
+    if post.text:
+        parts.append(post.text)
+    if post.caption:
+        parts.append(post.caption)
+
+    if post.document and getattr(post.document, "file_name", None):
+        parts.append(post.document.file_name)
+    if post.audio and getattr(post.audio, "file_name", None):
+        parts.append(post.audio.file_name)
+    if post.video and getattr(post.video, "file_name", None):
+        parts.append(post.video.file_name)
+
+    return " ".join(parts).strip()
+
+
 def build_message_link(result: SearchResult) -> Optional[str]:
     if not result.channel_username:
         return None
@@ -493,7 +527,19 @@ async def sync_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         async for post in client.iter_messages(entity, limit=limit, offset_id=offset_id):
             text = build_sync_text(post)
+        oldest_indexed_id = db.get_oldest_message_id(channel_id)
+        offset_id = oldest_indexed_id if oldest_indexed_id else 0
+
+        if offset_id:
+            await message.reply_text(
+                f"Continuing from older history before message_id={offset_id}."
+            )
+
+        async for post in client.iter_messages(entity, limit=limit, offset_id=offset_id):
+            text = build_sync_text(post)
             if not text:
+                # Keep a minimal placeholder so media-only posts are still indexed once.
+                text = "[media]"
                 # Keep a minimal placeholder so media-only posts are still indexed once.
                 text = "[media]"
                 skipped += 1
@@ -519,6 +565,7 @@ async def sync_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"Channel: {channel_ref}\n"
         f"Imported: {imported}\n"
         f"Media-only placeholders: {skipped}"
+        f"Media-only placeholders: {skipped}"
     )
 
 
@@ -528,7 +575,9 @@ async def index_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     text = build_channel_post_text(post)
+    text = build_channel_post_text(post)
     if not text:
+        text = "[media]"
         text = "[media]"
 
     chat = post.chat
