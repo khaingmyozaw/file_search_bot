@@ -113,7 +113,8 @@ async def sync_old_messages(
                 username=getattr(entity, 'username', None),
             )
 
-            async for msg in client.iter_messages(entity):
+            # Explicitly keep descending order: newest -> oldest.
+            async for msg in client.iter_messages(entity, reverse=False):
                 total += 1
 
                 if not getattr(msg, 'id', None):

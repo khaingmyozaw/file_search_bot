@@ -247,7 +247,7 @@ def build_admin_router(config: Config, session_factory: async_sessionmaker[Async
             return
 
         identifier = args[1].strip()
-        progress_message = await message.answer('Sync started...')
+        progress_message = await message.answer('Sync started (newest -> oldest)...')
 
         async def on_progress(saved: int, total: int) -> None:
             if total == 0 or total % 200 != 0:
@@ -260,7 +260,9 @@ def build_admin_router(config: Config, session_factory: async_sessionmaker[Async
             await progress_message.edit_text(f'Sync failed: {exc}')
             return
 
-        await progress_message.edit_text(f'Sync done. Indexed {saved} messages from {total} fetched.')
+        await progress_message.edit_text(
+            f'Sync done (newest -> oldest). Indexed {saved} messages from {total} fetched.'
+        )
 
     @router.message(Command('stats'))
     async def stats(message: Message) -> None:
